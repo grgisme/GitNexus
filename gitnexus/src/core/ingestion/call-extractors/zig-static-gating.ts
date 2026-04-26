@@ -1,7 +1,7 @@
 // gitnexus/src/core/ingestion/call-extractors/zig-static-gating.ts
 
 /**
- * Zig static-gating resolver — file-local pass.
+ * Zig static-gating resolver.
  *
  * Detects calls inside `if (CONST_FALSE)` blocks (and trivial boolean
  * extensions: `and`, `or`, simple negation) so the call edge can be
@@ -12,17 +12,28 @@
  * Conservative by design: we only tag an edge when we can prove the
  * gating expression evaluates to `false`.  Anything ambiguous → live.
  *
- * This commit lands the file-local resolver and the ancestor walker.
- * Cross-file `cfg.FOO` resolution arrives in a follow-up commit.
+ * v1 supports two scopes of resolution:
  *
- * Out of scope:
- *   - Cross-file flag references (handled in a follow-up commit).
- *   - Re-aliasing (`const FOO = OTHER;`).
+ *   (a) **File-local** consts (`pub const FOO = false;`) — built per
+ *       Zig file once and cached.
+ *   (b) **One-hop @import alias** (`const cfg = @import("./cfg.zig");
+ *       if (cfg.FOO) { ... }`) — resolved via the existing Zig import
+ *       resolver, with a separate per-file alias map.
+ *
+ * Out of scope for v1:
+ *   - Multi-hop: `cfg.sub.FOO` (we only handle one identifier dot one).
+ *   - Re-exported consts across multiple files.
  *   - Runtime-evaluated bools (`const FOO = computeIt();`).
- *   - Comparison ops in conditions (`==`, `!=`, `<`, …).
+ *   - Field re-aliasing (`const FOO = OTHER;`).
+ *
+ * Wire-up: see ./configs/zig.ts — the call extractor's
+ * `extractLanguageCallSite` hook walks ancestors and consults the
+ * resolver to decide whether to emit `staticGated: true`.
  */
 
 import type { SyntaxNode } from '../utils/ast-helpers.js';
+import { resolveZigImportInternal } from '../import-resolvers/zig.js';
+import type { ZigBuildZonConfig } from '../language-config.js';
 
 /** Maximum number of `if_statement` ancestors we walk above a call. */
 const MAX_IF_ANCESTORS = 5;
@@ -44,8 +55,24 @@ type TriBool = boolean | undefined;
  */
 export type ZigBoolConstMap = ReadonlyMap<string, boolean>;
 
+/**
+ * Per-file `@import` alias map, mapping a local identifier to the
+ * resolved absolute file path of the imported module.  Used for the
+ * `cfg.FOO` cross-file lookup pattern.
+ *
+ *   `const cfg = @import("./cfg.zig");`  →  Map { 'cfg' → 'src/cfg.zig' }
+ */
+export type ZigImportAliasMap = ReadonlyMap<string, string>;
+
+/**
+ * Cross-file lookup: given an alias-resolved file path, return that
+ * file's known-bool map.  Implemented by the caller — the resolver
+ * itself stays stateless.
+ */
+export type ZigBoolConstLookup = (filePath: string) => ZigBoolConstMap | undefined;
+
 // ---------------------------------------------------------------------------
-// Per-file extraction
+// Phase 2: per-file extraction
 // ---------------------------------------------------------------------------
 
 /**
@@ -92,13 +119,69 @@ function extractBoolConst(decl: SyntaxNode): { name: string; value: boolean } | 
   return null;
 }
 
+/**
+ * Walk the top-level of a Zig source file and collect `@import` alias
+ * declarations:
+ *
+ *   `const cfg = @import("./cfg.zig");`  →  Map { 'cfg' → 'src/cfg.zig' }
+ *
+ * Imports that don't resolve to a file in the repo (`@import("std")`,
+ * package deps without a build.zig.zon path, etc.) are skipped.
+ */
+export function buildZigImportAliasMap(
+  rootNode: SyntaxNode,
+  currentFilePath: string,
+  allFilePaths: Set<string>,
+  buildZon: ZigBuildZonConfig | null | undefined,
+): ZigImportAliasMap {
+  const out = new Map<string, string>();
+  for (const child of rootNode.namedChildren) {
+    if (child.type !== 'variable_declaration') continue;
+    const entry = extractImportAlias(child, currentFilePath, allFilePaths, buildZon);
+    if (entry) out.set(entry.name, entry.target);
+  }
+  return out;
+}
+
+function extractImportAlias(
+  decl: SyntaxNode,
+  currentFilePath: string,
+  allFilePaths: Set<string>,
+  buildZon: ZigBuildZonConfig | null | undefined,
+): { name: string; target: string } | null {
+  let name: string | undefined;
+  let importPath: string | undefined;
+
+  for (const c of decl.namedChildren) {
+    if (c.type === 'identifier' && name === undefined) {
+      name = c.text;
+      continue;
+    }
+    if (c.type === 'builtin_function') {
+      // Look for @import("...") shape.
+      const ident = c.namedChildren.find((cc) => cc.type === 'builtin_identifier');
+      if (!ident || ident.text !== '@import') continue;
+      const args = c.namedChildren.find((cc) => cc.type === 'arguments');
+      if (!args) continue;
+      const str = args.namedChildren.find((cc) => cc.type === 'string');
+      if (!str) continue;
+      const content = str.namedChildren.find((cc) => cc.type === 'string_content');
+      if (content) importPath = content.text;
+    }
+  }
+
+  if (name === undefined || importPath === undefined) return null;
+  const resolved = resolveZigImportInternal(currentFilePath, importPath, allFilePaths, buildZon);
+  if (!resolved) return null;
+  return { name, target: resolved };
+}
+
 // ---------------------------------------------------------------------------
-// Ancestor walk + condition evaluation
+// Phase 3: ancestor walk + condition evaluation
 // ---------------------------------------------------------------------------
 
 /**
- * Decide whether a call expression sits inside an `if (FALSE)` branch
- * using only file-local constants.
+ * Decide whether a call expression sits inside an `if (FALSE)` branch.
  *
  * Walks up to {@link MAX_IF_ANCESTORS} `if_statement` ancestors and
  * evaluates each condition.  Returns `true` if any one of them
@@ -108,11 +191,14 @@ function extractBoolConst(decl: SyntaxNode): { name: string; value: boolean } | 
  * dead-code patterns we care about (`if (FOO) { ... }` without an
  * `else`) put the gated body in the THEN branch, and the inverse
  * (`if (FOO) {} else { gated body }`) is rare enough in practice that
- * we accept the false-negative.
+ * we accept the false-negative.  A more thorough v2 would track which
+ * branch the call lives in.
  */
 export function isCallStaticGated(
   callNode: SyntaxNode,
   localBools: ZigBoolConstMap,
+  importAliases: ZigImportAliasMap,
+  lookupBoolsForPath: ZigBoolConstLookup,
 ): boolean {
   let current: SyntaxNode | null = callNode.parent;
   let ifCount = 0;
@@ -121,7 +207,7 @@ export function isCallStaticGated(
       ifCount++;
       const cond = findIfCondition(current);
       if (cond) {
-        const result = evalCond(cond, localBools, 0);
+        const result = evalCond(cond, localBools, importAliases, lookupBoolsForPath, 0);
         if (result === false) return true;
       }
     }
@@ -145,6 +231,8 @@ function findIfCondition(ifNode: SyntaxNode): SyntaxNode | null {
 function evalCond(
   node: SyntaxNode,
   localBools: ZigBoolConstMap,
+  importAliases: ZigImportAliasMap,
+  lookupBoolsForPath: ZigBoolConstLookup,
   depth: number,
 ): TriBool {
   if (depth > MAX_COND_DEPTH) return undefined;
@@ -163,14 +251,32 @@ function evalCond(
       return v === undefined ? undefined : v;
     }
 
+    case 'field_expression': {
+      // `cfg.FOO` — alias hop.
+      const obj = node.namedChildren[0];
+      const member = node.namedChildren[1];
+      if (
+        obj?.type !== 'identifier' ||
+        member?.type !== 'identifier'
+      ) {
+        return undefined;
+      }
+      const targetFile = importAliases.get(obj.text);
+      if (!targetFile) return undefined;
+      const targetBools = lookupBoolsForPath(targetFile);
+      if (!targetBools) return undefined;
+      const v = targetBools.get(member.text);
+      return v === undefined ? undefined : v;
+    }
+
     case 'binary_expression': {
       // `lhs and rhs` / `lhs or rhs`.
       const op = findOperatorToken(node);
       const lhs = node.namedChildren[0];
       const rhs = node.namedChildren[1];
       if (!lhs || !rhs) return undefined;
-      const l = evalCond(lhs, localBools, depth + 1);
-      const r = evalCond(rhs, localBools, depth + 1);
+      const l = evalCond(lhs, localBools, importAliases, lookupBoolsForPath, depth + 1);
+      const r = evalCond(rhs, localBools, importAliases, lookupBoolsForPath, depth + 1);
       if (op === 'and') {
         // `false and *` = false; `* and false` = false.
         if (l === false || r === false) return false;
@@ -183,6 +289,7 @@ function evalCond(
         if (l === true || r === true) return true;
         return undefined;
       }
+      // Comparison ops (==, !=, <, >, …) — not handled in v1.
       return undefined;
     }
 
@@ -192,9 +299,10 @@ function evalCond(
       // error-union types.  We handle the pragmatic case: a single
       // resolvable identifier inside an `error_union_type` whose
       // immediate parent is an `if_statement` condition position.
+      // Negate the inner value.
       const inner = node.namedChildren[0];
       if (!inner) return undefined;
-      const v = evalCond(inner, localBools, depth + 1);
+      const v = evalCond(inner, localBools, importAliases, lookupBoolsForPath, depth + 1);
       if (v === undefined) return undefined;
       return !v;
     }
@@ -214,6 +322,7 @@ function findOperatorToken(binExpr: SyntaxNode): string | undefined {
     const c = binExpr.child(i);
     if (!c) continue;
     if (!c.isNamed) {
+      // Anonymous tokens for boolean ops carry their text as the type.
       if (c.type === 'and' || c.type === 'or') return c.type;
     }
   }
