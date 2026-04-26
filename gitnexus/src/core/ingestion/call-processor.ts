@@ -38,6 +38,12 @@ import { getProvider } from './languages/index.js';
 import { generateId } from '../../lib/utils.js';
 import { getLanguageFromFilename, SupportedLanguages } from 'gitnexus-shared';
 import { isRegistryPrimary } from './registry-primary-flag.js';
+import {
+  buildZigBoolConstMap,
+  isCallStaticGated,
+  type ZigBoolConstMap,
+  type ZigImportAliasMap,
+} from './call-extractors/zig-static-gating.js';
 import { isVerboseIngestionEnabled } from './utils/verbose.js';
 import { yieldToEventLoop } from './utils/event-loop.js';
 import {
@@ -885,6 +891,16 @@ export const processCalls = async (
     ctx.enableCache(file.path);
     const widenCache: WidenCache = new Map();
 
+    // Zig static-gating (file-local scope, v1): build the file's
+    // known-bool table once so each call-edge emission can ask
+    // whether it's inside an `if (CONST_FALSE)` branch.  Other
+    // languages get `undefined` and skip the check entirely.
+    const zigStaticGatingBools: ZigBoolConstMap | undefined =
+      language === SupportedLanguages.Zig
+        ? buildZigBoolConstMap(tree.rootNode)
+        : undefined;
+    const zigEmptyAliases: ZigImportAliasMap = new Map();
+
     matches.forEach((match) => {
       const captureMap: Record<string, any> = {};
       match.captures.forEach((c) => (captureMap[c.name] = c.node));
@@ -1299,6 +1315,14 @@ export const processCalls = async (
       if (!resolved) return;
       const relId = generateId('CALLS', `${sourceId}:${calledName}->${resolved.nodeId}`);
 
+      // Zig: tag the edge when the call sits inside a comptime-false
+      // branch.  Other languages always evaluate to false here because
+      // `zigStaticGatingBools` is undefined for them.
+      const staticGated =
+        zigStaticGatingBools !== undefined
+          ? isCallStaticGated(callNode, zigStaticGatingBools, zigEmptyAliases, () => undefined)
+          : false;
+
       graph.addRelationship({
         id: relId,
         sourceId,
@@ -1306,6 +1330,7 @@ export const processCalls = async (
         type: 'CALLS',
         confidence: resolved.confidence,
         reason: resolved.reason,
+        ...(staticGated ? { staticGated: true } : {}),
       });
 
       if (heritageMap && callForm === 'member' && receiverTypeName) {
@@ -1325,6 +1350,7 @@ export const processCalls = async (
             type: 'CALLS',
             confidence: impl.confidence,
             reason: impl.reason,
+            ...(staticGated ? { staticGated: true } : {}),
           });
         }
       }
