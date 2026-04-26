@@ -80,6 +80,12 @@ import {
 } from '../utils/method-props.js';
 import type { LanguageProvider } from '../language-provider.js';
 import type { ParsedFile } from 'gitnexus-shared';
+import {
+  buildZigBoolConstMap,
+  isCallStaticGated,
+  type ZigBoolConstMap,
+  type ZigImportAliasMap,
+} from '../call-extractors/zig-static-gating.js';
 import { extractParsedFile } from '../scope-extractor-bridge.js';
 
 // ============================================================================
@@ -164,6 +170,10 @@ export interface ExtractedCall {
    */
   receiverMixedChain?: MixedChainStep[];
   argTypes?: (string | undefined)[];
+  /** When true, the call sits inside an `if (CONST_FALSE)` branch
+   *  known at index time to be unreachable. Threaded to the
+   *  emitted CALLS edge as `GraphRelationship.staticGated`. */
+  staticGated?: boolean;
 }
 
 export interface ExtractedAssignment {
@@ -1428,6 +1438,18 @@ const processFileGroup = (
 
     const provider = getProvider(language);
 
+    // Zig static-gating context: build the file-local known-bool
+    // table once per file so the call-extraction loop can stamp
+    // edges originating in `if (CONST_FALSE)` branches with
+    // `staticGated: true`.  v1 is file-local only; cross-file alias
+    // resolution is wired but unused (we'd need to plumb the global
+    // file list + build.zig.zon into this worker to enable it).
+    const zigStaticGatingBools: ZigBoolConstMap | undefined =
+      language === SupportedLanguages.Zig
+        ? buildZigBoolConstMap(tree.rootNode)
+        : undefined;
+    const zigEmptyAliases: ZigImportAliasMap = new Map();
+
     // RFC #909 Ring 2: produce a `ParsedFile` for the new scope-based
     // resolution pipeline. No-op (returns undefined) for every language
     // today — only fires once a provider implements `emitScopeCaptures`.
@@ -1911,6 +1933,19 @@ const processFileGroup = (
                       )
                     : undefined;
 
+                // Zig only: tag the call when it sits inside a
+                // comptime-false `if` branch.  Other languages get
+                // `undefined` and read identically to "live".
+                const staticGated =
+                  zigStaticGatingBools !== undefined
+                    ? isCallStaticGated(
+                        callNode,
+                        zigStaticGatingBools,
+                        zigEmptyAliases,
+                        () => undefined,
+                      )
+                    : false;
+
                 result.calls.push({
                   filePath: file.path,
                   calledName: callSite.calledName,
@@ -1925,6 +1960,7 @@ const processFileGroup = (
                     ? { receiverMixedChain: callSite.receiverMixedChain }
                     : {}),
                   ...(argTypes !== undefined ? { argTypes } : {}),
+                  ...(staticGated ? { staticGated: true } : {}),
                 });
               }
             }

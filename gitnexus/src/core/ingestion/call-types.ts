@@ -31,6 +31,12 @@ export interface ExtractedCallSite {
    *  starts with an uppercase letter and has no TypeEnv binding, treat it
    *  as a type name (e.g. Java `User::getName`). */
   typeAsReceiverHeuristic?: boolean;
+  /** When true, the call site sits inside a code branch known at index
+   *  time to be unreachable in production (e.g. a Zig
+   *  `if (CONST_FALSE)` block where the condition reduces to a
+   *  comptime-known `false`).  Threaded through to the emitted CALLS
+   *  edge as `GraphRelationship.staticGated`. */
+  staticGated?: boolean;
 }
 
 // ---------------------------------------------------------------------------

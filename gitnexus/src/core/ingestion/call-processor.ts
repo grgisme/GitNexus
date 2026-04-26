@@ -2868,6 +2868,7 @@ export const processCallsFromExtracted = async (
         type: 'CALLS',
         confidence: resolved.confidence,
         reason: resolved.reason,
+        ...(effectiveCall.staticGated ? { staticGated: true } : {}),
       });
 
       if (heritageMap && effectiveCall.callForm === 'member' && effectiveCall.receiverTypeName) {
@@ -2890,6 +2891,7 @@ export const processCallsFromExtracted = async (
             type: 'CALLS',
             confidence: impl.confidence,
             reason: impl.reason,
+            ...(effectiveCall.staticGated ? { staticGated: true } : {}),
           });
         }
       }
