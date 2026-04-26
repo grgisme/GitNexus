@@ -2561,8 +2561,8 @@ export class LocalBackend {
       const idList = frontier.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
       const query =
         direction === 'upstream'
-          ? `MATCH (caller)-[r:CodeRelation]->(n) WHERE n.id IN [${idList}] AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, caller.id AS id, caller.name AS name, labels(caller)[0] AS type, caller.filePath AS filePath, r.type AS relType, r.confidence AS confidence`
-          : `MATCH (n)-[r:CodeRelation]->(callee) WHERE n.id IN [${idList}] AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, callee.id AS id, callee.name AS name, labels(callee)[0] AS type, callee.filePath AS filePath, r.type AS relType, r.confidence AS confidence`;
+          ? `MATCH (caller)-[r:CodeRelation]->(n) WHERE n.id IN [${idList}] AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, caller.id AS id, caller.name AS name, labels(caller)[0] AS type, caller.filePath AS filePath, r.type AS relType, r.confidence AS confidence, r.staticGated AS staticGated`
+          : `MATCH (n)-[r:CodeRelation]->(callee) WHERE n.id IN [${idList}] AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, callee.id AS id, callee.name AS name, labels(callee)[0] AS type, callee.filePath AS filePath, r.type AS relType, r.confidence AS confidence, r.staticGated AS staticGated`;
 
       try {
         const related = await executeQuery(repo.id, query);
@@ -2584,6 +2584,12 @@ export class LocalBackend {
               typeof storedConfidence === 'number' && storedConfidence > 0
                 ? storedConfidence
                 : confidenceForRelType(relationType);
+            // Surface the staticGated flag (currently set only by Zig).
+            // Coerce to a strict boolean: Cypher returns null/undefined for
+            // edges from older indexes or non-Zig languages, which we read
+            // as `false` (live).
+            const staticGatedRaw = rel.staticGated ?? rel[7];
+            const staticGated = staticGatedRaw === true;
             impacted.push({
               depth,
               id: relId,
@@ -2592,6 +2598,7 @@ export class LocalBackend {
               filePath,
               relationType,
               confidence: effectiveConfidence,
+              staticGated,
             });
           }
         }
