@@ -423,7 +423,8 @@ CREATE REL TABLE ${REL_TABLE_NAME} (
   type STRING,
   confidence DOUBLE,
   reason STRING,
-  step INT32
+  step INT32,
+  staticGated BOOLEAN
 )`;
 
 // ============================================================================

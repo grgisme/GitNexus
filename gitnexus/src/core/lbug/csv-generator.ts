@@ -507,8 +507,15 @@ export const streamAllCSVsToDisk = async (
 
   // --- Stream relationship CSV ---
   const relCsvPath = path.join(csvDir, 'relations.csv');
-  const relWriter = new BufferedCSVWriter(relCsvPath, 'from,to,type,confidence,reason,step');
+  const relWriter = new BufferedCSVWriter(
+    relCsvPath,
+    'from,to,type,confidence,reason,step,staticGated',
+  );
   for (const rel of graph.iterRelationships()) {
+    // Persist `staticGated` as 0/1; LadybugDB BOOLEAN COPY accepts these.
+    // Default to 0 (live) for every edge that doesn't carry the flag —
+    // existing readers treat absence and `false` identically.
+    const staticGated = rel.staticGated === true ? 1 : 0;
     await relWriter.addRow(
       [
         escapeCSVField(rel.sourceId),
@@ -517,6 +524,7 @@ export const streamAllCSVsToDisk = async (
         escapeCSVNumber(rel.confidence, 1.0),
         escapeCSVField(rel.reason),
         escapeCSVNumber((rel as any).step, 0),
+        String(staticGated),
       ].join(','),
     );
   }
