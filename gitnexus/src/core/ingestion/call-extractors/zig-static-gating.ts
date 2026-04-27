@@ -380,9 +380,30 @@ function ifBranchDirection(
 ): 'consequence' | 'alternative' | 'condition' {
   if (ascendedFrom.type === 'else_clause') return 'alternative';
   const body = ifNode.childForFieldName('body');
-  if (body && ascendedFrom === body) return 'consequence';
+  // tree-sitter wraps each accessor call in a fresh JS object, so
+  // reference equality (`a === b`) is unreliable even when both
+  // wrappers point at the same underlying syntax node.  Compare by
+  // the stable numeric `id` instead — every wrapper for one node
+  // exposes the same `id`.
+  if (body && nodesEqual(body, ascendedFrom)) return 'consequence';
   // Fall through: must be the condition expression.
   return 'condition';
+}
+
+/** Reference-equal-by-stable-id check for tree-sitter syntax nodes. */
+function nodesEqual(a: SyntaxNode, b: SyntaxNode): boolean {
+  // The native binding exposes a numeric `id` per node.  TypeScript's
+  // `SyntaxNode` typing doesn't surface it, so we widen to `unknown`
+  // and read defensively — if the runtime lacks `id`, fall back to
+  // structural equality on byte range + type.
+  const aId = (a as unknown as { id?: number }).id;
+  const bId = (b as unknown as { id?: number }).id;
+  if (typeof aId === 'number' && typeof bId === 'number') return aId === bId;
+  return (
+    a.type === b.type &&
+    a.startIndex === b.startIndex &&
+    a.endIndex === b.endIndex
+  );
 }
 
 /** Pick the condition node out of an `if_statement`. The condition is
