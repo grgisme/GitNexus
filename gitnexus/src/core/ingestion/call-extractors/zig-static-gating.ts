@@ -263,18 +263,23 @@ function extractImportAlias(
 // ---------------------------------------------------------------------------
 
 /**
- * Decide whether a call expression sits inside an `if (FALSE)` branch.
+ * Decide whether a call expression sits inside a statically-dead
+ * branch of any enclosing `if` statement.
  *
- * Walks up to {@link MAX_IF_ANCESTORS} `if_statement` ancestors and
- * evaluates each condition.  Returns `true` if any one of them
- * provably evaluates to `false`.
+ * Walks up to {@link MAX_IF_ANCESTORS} `if_statement` ancestors,
+ * tracking the descent direction (consequence vs alternative) so we
+ * can flag the dead branch correctly:
  *
- * Note: we don't currently distinguish the THEN vs ELSE branch.  Most
- * dead-code patterns we care about (`if (FOO) { ... }` without an
- * `else`) put the gated body in the THEN branch, and the inverse
- * (`if (FOO) {} else { gated body }`) is rare enough in practice that
- * we accept the false-negative.  A more thorough v2 would track which
- * branch the call lives in.
+ *    cond=false, via body         → DEAD (gated)
+ *    cond=true,  via else_clause  → DEAD (gated)
+ *    cond=true,  via body         → live (no signal from this ancestor)
+ *    cond=false, via else_clause  → live (no signal)
+ *    cond=unknown                 → no signal
+ *
+ * Returns `true` if ANY ancestor proves the call is dead.  `else if`
+ * chains nest naturally as `else_clause → if_statement → ...`, so
+ * each level applies the rule independently and the walker visits
+ * them all on the way up.
  */
 export function isCallStaticGated(
   callNode: SyntaxNode,
@@ -282,20 +287,48 @@ export function isCallStaticGated(
   importAliases: ZigImportAliasMap,
   lookupBoolsForPath: ZigBoolConstLookup,
 ): boolean {
-  let current: SyntaxNode | null = callNode.parent;
+  let child: SyntaxNode = callNode;
+  let parent: SyntaxNode | null = callNode.parent;
   let ifCount = 0;
-  while (current && ifCount < MAX_IF_ANCESTORS) {
-    if (current.type === 'if_statement') {
+  while (parent && ifCount < MAX_IF_ANCESTORS) {
+    if (parent.type === 'if_statement') {
       ifCount++;
-      const cond = findIfCondition(current);
-      if (cond) {
-        const result = evalCond(cond, localBools, importAliases, lookupBoolsForPath, 0);
-        if (result === false) return true;
+      const direction = ifBranchDirection(parent, child);
+      if (direction !== 'condition') {
+        const cond = findIfCondition(parent);
+        if (cond) {
+          const result = evalCond(cond, localBools, importAliases, lookupBoolsForPath, 0);
+          if (result === false && direction === 'consequence') return true;
+          if (result === true && direction === 'alternative') return true;
+        }
       }
     }
-    current = current.parent;
+    child = parent;
+    parent = parent.parent;
   }
   return false;
+}
+
+/**
+ * Given an `if_statement` and a direct child node we just ascended
+ * from, classify which slot of the if the child sits in.
+ *
+ * Returns `'consequence'` when the child is the body (the THEN
+ * branch), `'alternative'` when the child is the `else_clause` (or
+ * the call lives inside its subtree, which it does because we walked
+ * up through it), and `'condition'` when — pathologically — the call
+ * lives inside the condition expression itself.  Conditions don't
+ * gate themselves, so the caller treats `'condition'` as no-op.
+ */
+function ifBranchDirection(
+  ifNode: SyntaxNode,
+  ascendedFrom: SyntaxNode,
+): 'consequence' | 'alternative' | 'condition' {
+  if (ascendedFrom.type === 'else_clause') return 'alternative';
+  const body = ifNode.childForFieldName('body');
+  if (body && ascendedFrom === body) return 'consequence';
+  // Fall through: must be the condition expression.
+  return 'condition';
 }
 
 /** Pick the condition node out of an `if_statement`. The condition is

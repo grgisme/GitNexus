@@ -115,6 +115,31 @@ pub fn run() void {
     if (ALIAS_TO_VAR) {
         live_alias_to_var();
     }
+
+    // Branch awareness: `if (FALSE) { dead } else { live }`.
+    if (UPGRADERS_ENABLED) {
+        gated_then_branch();
+    } else {
+        live_else_branch();
+    }
+
+    // Inverse: `if (TRUE) { live } else { dead }`.
+    if (DEBUG) {
+        live_then_branch();
+    } else {
+        gated_else_branch();
+    }
+
+    // else-if chain: A=false → enter else; B=true → take that branch.
+    // gated_outer_then is dead (A=false). live_chain_mid is live (B=true).
+    // dead_chain_tail (in inner else) is also dead (B=true makes its branch unreachable).
+    if (UPGRADERS_ENABLED) {
+        gated_outer_then();
+    } else if (DEBUG) {
+        live_chain_mid();
+    } else {
+        gated_chain_tail();
+    }
 }
 
 fn live_unconditional() void {
@@ -194,6 +219,34 @@ fn live_alias_cycle() void {
 }
 
 fn live_alias_to_var() void {
+    _ = 1;
+}
+
+fn gated_then_branch() void {
+    _ = 1;
+}
+
+fn live_else_branch() void {
+    _ = 1;
+}
+
+fn live_then_branch() void {
+    _ = 1;
+}
+
+fn gated_else_branch() void {
+    _ = 1;
+}
+
+fn gated_outer_then() void {
+    _ = 1;
+}
+
+fn live_chain_mid() void {
+    _ = 1;
+}
+
+fn gated_chain_tail() void {
     _ = 1;
 }
 

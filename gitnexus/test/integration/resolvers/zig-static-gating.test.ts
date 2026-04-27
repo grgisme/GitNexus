@@ -106,4 +106,32 @@ describe('Zig static-gated edges', () => {
   it('does NOT tag alias whose chain root is a `var` (not a const)', () => {
     expect(isGated('live_alias_to_var')).toBe(false);
   });
+
+  it('tags `if (FALSE) { dead }` THEN branch as gated', () => {
+    expect(isGated('gated_then_branch')).toBe(true);
+  });
+
+  it('does NOT tag the ELSE branch of `if (FALSE)` (it is live)', () => {
+    expect(isGated('live_else_branch')).toBe(false);
+  });
+
+  it('does NOT tag the THEN branch of `if (TRUE)` (it is live)', () => {
+    expect(isGated('live_then_branch')).toBe(false);
+  });
+
+  it('tags the ELSE branch of `if (TRUE)` as gated', () => {
+    expect(isGated('gated_else_branch')).toBe(true);
+  });
+
+  it('tags `if (FALSE) { dead }` in else-if chain as gated', () => {
+    expect(isGated('gated_outer_then')).toBe(true);
+  });
+
+  it('does NOT tag the live arm of an else-if chain', () => {
+    expect(isGated('live_chain_mid')).toBe(false);
+  });
+
+  it('tags the trailing else of `else if (TRUE)` as gated', () => {
+    expect(isGated('gated_chain_tail')).toBe(true);
+  });
 });
