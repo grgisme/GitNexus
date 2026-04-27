@@ -10,6 +10,9 @@
 pub const UPGRADERS_ENABLED: bool = false;
 pub const DEBUG: bool = true;
 pub const FEATURE_X: bool = false;
+// `var` (mutable global) — must NOT feed static gating, even though
+// the initial value is `false`.  `live_under_var` below must stay live.
+pub var IS_RUNTIME_FLAG_FALSE: bool = false;
 
 pub fn run() void {
     // Live: not under any if-gate.
@@ -49,6 +52,12 @@ pub fn run() void {
     if (some_runtime_flag()) {
         live_under_unknown();
     }
+
+    // Live: `var` initialized to `false` is mutable global state, not
+    // a comptime constant — gating must NOT trigger.
+    if (IS_RUNTIME_FLAG_FALSE) {
+        live_under_var();
+    }
 }
 
 fn live_unconditional() void {
@@ -80,6 +89,10 @@ fn live_under_true_const() void {
 }
 
 fn live_under_unknown() void {
+    _ = 1;
+}
+
+fn live_under_var() void {
     _ = 1;
 }
 

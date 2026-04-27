@@ -98,6 +98,20 @@ export function buildZigBoolConstMap(rootNode: SyntaxNode): ZigBoolConstMap {
 }
 
 function extractBoolConst(decl: SyntaxNode): { name: string; value: boolean } | null {
+  // Require `const` and exclude `var`. tree-sitter-zig parses both with
+  // the same `variable_declaration` shape; the qualifier is an anonymous
+  // child token. A `pub var FOO = false;` is mutable global state — its
+  // initial value is NOT a comptime constant and must not feed gating.
+  let isConst = false;
+  let isVar = false;
+  for (let i = 0; i < decl.childCount; i++) {
+    const c = decl.child(i);
+    if (!c || c.isNamed) continue;
+    if (c.type === 'const') isConst = true;
+    else if (c.type === 'var') isVar = true;
+  }
+  if (!isConst || isVar) return null;
+
   let name: string | undefined;
   let value: boolean | undefined;
 
@@ -149,6 +163,19 @@ function extractImportAlias(
   allFilePaths: Set<string>,
   buildZon: ZigBuildZonConfig | null | undefined,
 ): { name: string; target: string } | null {
+  // Require `const` (the idiomatic spelling for `@import` aliases).
+  // `var cfg = @import(...)` is technically legal but would let a
+  // later assignment shadow the import; we don't follow assignments.
+  let isConst = false;
+  let isVar = false;
+  for (let i = 0; i < decl.childCount; i++) {
+    const c = decl.child(i);
+    if (!c || c.isNamed) continue;
+    if (c.type === 'const') isConst = true;
+    else if (c.type === 'var') isVar = true;
+  }
+  if (!isConst || isVar) return null;
+
   let name: string | undefined;
   let importPath: string | undefined;
 

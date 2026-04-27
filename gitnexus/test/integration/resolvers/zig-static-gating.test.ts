@@ -58,4 +58,8 @@ describe('Zig static-gated edges', () => {
   it('does NOT tag calls under unknown / runtime conditions', () => {
     expect(isGated('live_under_unknown')).toBe(false);
   });
+
+  it('does NOT tag calls under `if (var FOO = false)` (var is mutable global, not const)', () => {
+    expect(isGated('live_under_var')).toBe(false);
+  });
 });
