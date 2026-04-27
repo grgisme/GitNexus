@@ -58,6 +58,28 @@ pub fn run() void {
     if (IS_RUNTIME_FLAG_FALSE) {
         live_under_var();
     }
+
+    // Gated: comparison operators against known-bool constants.
+    // `UPGRADERS_ENABLED == true` ≡ `false`.
+    if (UPGRADERS_ENABLED == true) {
+        gated_eq_true();
+    }
+    // `DEBUG == false` ≡ `false` (DEBUG is true, so equality with false is false).
+    if (DEBUG == false) {
+        gated_eq_false();
+    }
+    // `UPGRADERS_ENABLED != false` ≡ `false`.
+    if (UPGRADERS_ENABLED != false) {
+        gated_neq_false();
+    }
+    // `DEBUG != true` ≡ `false` (DEBUG is true).
+    if (DEBUG != true) {
+        gated_neq_true();
+    }
+    // Symmetric: `false == UPGRADERS_ENABLED` ≡ `true` (both false).
+    if (false == UPGRADERS_ENABLED) {
+        live_sym_eq();
+    }
 }
 
 fn live_unconditional() void {
@@ -93,6 +115,26 @@ fn live_under_unknown() void {
 }
 
 fn live_under_var() void {
+    _ = 1;
+}
+
+fn gated_eq_true() void {
+    _ = 1;
+}
+
+fn gated_eq_false() void {
+    _ = 1;
+}
+
+fn gated_neq_false() void {
+    _ = 1;
+}
+
+fn gated_neq_true() void {
+    _ = 1;
+}
+
+fn live_sym_eq() void {
     _ = 1;
 }
 

@@ -297,7 +297,7 @@ function evalCond(
     }
 
     case 'binary_expression': {
-      // `lhs and rhs` / `lhs or rhs`.
+      // `lhs and rhs` / `lhs or rhs` / `lhs == rhs` / `lhs != rhs`.
       const op = findOperatorToken(node);
       const lhs = node.namedChildren[0];
       const rhs = node.namedChildren[1];
@@ -316,7 +316,17 @@ function evalCond(
         if (l === true || r === true) return true;
         return undefined;
       }
-      // Comparison ops (==, !=, <, >, …) — not handled in v1.
+      if (op === '==') {
+        // Equality folds when both sides are known booleans.
+        // `FOO == false` ↔ `!FOO`; `FOO == true` ↔ `FOO`.
+        if (l === undefined || r === undefined) return undefined;
+        return l === r;
+      }
+      if (op === '!=') {
+        if (l === undefined || r === undefined) return undefined;
+        return l !== r;
+      }
+      // Other comparison ops (<, >, …) — not booleans we can prove.
       return undefined;
     }
 
@@ -349,8 +359,10 @@ function findOperatorToken(binExpr: SyntaxNode): string | undefined {
     const c = binExpr.child(i);
     if (!c) continue;
     if (!c.isNamed) {
-      // Anonymous tokens for boolean ops carry their text as the type.
-      if (c.type === 'and' || c.type === 'or') return c.type;
+      // Anonymous tokens for these ops carry their text as the type.
+      if (c.type === 'and' || c.type === 'or' || c.type === '==' || c.type === '!=') {
+        return c.type;
+      }
     }
   }
   return undefined;

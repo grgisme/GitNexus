@@ -62,4 +62,24 @@ describe('Zig static-gated edges', () => {
   it('does NOT tag calls under `if (var FOO = false)` (var is mutable global, not const)', () => {
     expect(isGated('live_under_var')).toBe(false);
   });
+
+  it('tags `if (FOO == true)` when FOO is false', () => {
+    expect(isGated('gated_eq_true')).toBe(true);
+  });
+
+  it('tags `if (FOO == false)` when FOO is true', () => {
+    expect(isGated('gated_eq_false')).toBe(true);
+  });
+
+  it('tags `if (FOO != false)` when FOO is false', () => {
+    expect(isGated('gated_neq_false')).toBe(true);
+  });
+
+  it('tags `if (FOO != true)` when FOO is true', () => {
+    expect(isGated('gated_neq_true')).toBe(true);
+  });
+
+  it('does NOT tag `if (false == FOO)` when FOO is false (provably TRUE)', () => {
+    expect(isGated('live_sym_eq')).toBe(false);
+  });
 });
