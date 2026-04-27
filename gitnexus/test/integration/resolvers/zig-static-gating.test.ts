@@ -134,4 +134,24 @@ describe('Zig static-gated edges', () => {
   it('tags the trailing else of `else if (TRUE)` as gated', () => {
     expect(isGated('gated_chain_tail')).toBe(true);
   });
+
+  it('tags `if (cfg.FOO)` cross-file when FOO is false in cfg.zig', () => {
+    expect(isGated('gated_cross_file_foo')).toBe(true);
+  });
+
+  it('does NOT tag the THEN branch of `if (cfg.BAR)` when BAR is true', () => {
+    expect(isGated('live_cross_file_bar')).toBe(false);
+  });
+
+  it('tags the ELSE branch of `if (cfg.BAR)` when BAR is true', () => {
+    expect(isGated('gated_cross_file_else')).toBe(true);
+  });
+
+  it('does NOT tag `cfg.UNDEFINED_NAME` (member not found in imported file)', () => {
+    expect(isGated('live_cross_file_undefined')).toBe(false);
+  });
+
+  it('does NOT tag `cfg.NOT_A_BOOL != 0` (imported decl is not a bool literal)', () => {
+    expect(isGated('live_cross_file_not_bool')).toBe(false);
+  });
 });

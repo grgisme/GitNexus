@@ -61,6 +61,7 @@ import type { ExtractedHeritage } from '../model/heritage-map.js';
 import type { KnowledgeGraph } from '../../graph/types.js';
 import type { PipelineOptions } from '../pipeline.js';
 import { extractFetchCallsFromFiles } from '../call-processor.js';
+import { type ZigCrossFileGatingContext } from '../call-processor.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -68,6 +69,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDev } from '../utils/env.js';
 import { synthesizeWildcardImportBindings, needsSynthesis } from './wildcard-synthesis.js';
 import { extractORMQueriesInline } from './orm-extraction.js';
+import {
+  isCallStaticGated,
+  type ZigBoolConstMap,
+  type ZigImportAliasMap,
+} from '../call-extractors/zig-static-gating.js';
+import { resolveZigImportInternal } from '../import-resolvers/zig.js';
+import { loadZigBuildZon } from '../language-config.js';
+import { SupportedLanguages } from 'gitnexus-shared';
+import { loadLanguage, loadParser } from '../../tree-sitter/parser-loader.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -270,6 +280,10 @@ export async function runChunkedParseAndResolve(
   const deferredWorkerHeritage: ExtractedHeritage[] = [];
   const deferredConstructorBindings: FileConstructorBindings[] = [];
   const deferredAssignments: ExtractedAssignment[] = [];
+  /** v2 cross-file Zig gating: per-file bool maps emitted by workers. */
+  const deferredZigBoolMaps: Array<{ filePath: string; bools: Record<string, boolean> }> = [];
+  /** v2 cross-file Zig gating: per-file raw `@import` alias maps. */
+  const deferredZigRawAliases: Array<{ filePath: string; aliases: Record<string, string> }> = [];
 
   try {
     for (let chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
@@ -412,6 +426,14 @@ export async function runChunkedParseAndResolve(
         if (chunkWorkerData.ormQueries?.length) {
           for (const item of chunkWorkerData.ormQueries) allORMQueries.push(item);
         }
+        if (chunkWorkerData.zigBoolMaps?.length) {
+          for (const item of chunkWorkerData.zigBoolMaps) deferredZigBoolMaps.push(item);
+        }
+        if (chunkWorkerData.zigRawImportAliases?.length) {
+          for (const item of chunkWorkerData.zigRawImportAliases) {
+            deferredZigRawAliases.push(item);
+          }
+        }
       } else {
         await processImports(graph, chunkFiles, astCache, ctx, undefined, repoPath, allPaths);
         sequentialChunkPaths.push(chunkPaths);
@@ -425,6 +447,22 @@ export async function runChunkedParseAndResolve(
       deferredWorkerHeritage.length > 0
         ? buildHeritageMap(deferredWorkerHeritage, ctx, getHeritageStrategyForLanguage)
         : undefined;
+
+    // v2 cross-file Zig static-gating pass.  The worker emitted
+    // per-file bool maps + raw `@import` aliases plus a `zigCallPos`
+    // on each Zig `ExtractedCall`.  Now — with the global file list
+    // and parsed `build.zig.zon` available — we resolve `cfg.FOO`
+    // patterns and stamp `staticGated: true` on any newly-proven-
+    // dead call BEFORE `processCallsFromExtracted` consumes it.
+    if (deferredZigBoolMaps.length > 0 || deferredWorkerCalls.some((c) => c.zigCallPos !== undefined)) {
+      await applyZigCrossFileGatingFromWorkerData(
+        deferredWorkerCalls,
+        deferredZigBoolMaps,
+        deferredZigRawAliases,
+        repoPath,
+        allPaths,
+      );
+    }
 
     if (deferredWorkerCalls.length > 0) {
       await processCallsFromExtracted(
@@ -502,6 +540,17 @@ export async function runChunkedParseAndResolve(
         ? buildHeritageMap(allSequentialHeritage, ctx, getHeritageStrategyForLanguage)
         : undefined;
 
+    // v2 cross-file Zig gating context shared across sequential
+    // chunks.  `globalBoolMaps` accumulates per-Zig-file bool maps
+    // as `processCalls` parses each file, so the second-and-later
+    // chunks see bool maps from earlier chunks for `cfg.FOO` lookup.
+    const sequentialZigGating: ZigCrossFileGatingContext | undefined =
+      sequentialChunkPaths.some((paths) =>
+        paths.some((p) => getLanguageFromFilename(p) === SupportedLanguages.Zig),
+      )
+        ? await buildSequentialZigCrossFileContext(allPaths, repoPath)
+        : undefined;
+
     for (let chunkIdx = 0; chunkIdx < sequentialChunkPaths.length; chunkIdx++) {
       const chunkFiles = cachedSequentialChunkFiles[chunkIdx];
       astCache = createASTCache(chunkFiles.length);
@@ -517,6 +566,7 @@ export async function runChunkedParseAndResolve(
         undefined,
         sequentialHeritageMap,
         bindingAccumulator,
+        sequentialZigGating,
       );
       await processHeritage(graph, chunkFiles, astCache, ctx);
       if (rubyHeritage.length > 0) {
@@ -620,5 +670,145 @@ export async function runChunkedParseAndResolve(
     // chunk-local `astCache` above is intentionally NOT exposed
     // because parse-impl clears it between chunks.
     scopeTreeCache,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// v2 cross-file Zig static-gating helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Worker-path post-pass that resolves `cfg.FOO` patterns across
+ * `@import` boundaries.  The worker already stamped `staticGated:
+ * true` for file-local proofs; this pass walks every Zig call's
+ * if-ancestor chain again — this time with the global bool map and
+ * an alias resolver that can hop into other files.
+ *
+ * Pairing AST nodes back to `ExtractedCall` records uses
+ * `zigCallPos` (byte offset of the call_expression's start), emitted
+ * by the worker for Zig calls only.
+ *
+ * Mutates `extractedCalls` in place: any newly-proven-dead call gets
+ * `staticGated = true`.  Preserves any prior `staticGated: true` flag
+ * (we only ever upgrade to true, never demote).
+ */
+async function applyZigCrossFileGatingFromWorkerData(
+  extractedCalls: ExtractedCall[],
+  zigBoolMaps: Array<{ filePath: string; bools: Record<string, boolean> }>,
+  zigRawAliases: Array<{ filePath: string; aliases: Record<string, string> }>,
+  repoPath: string,
+  allPaths: string[],
+): Promise<void> {
+  const allFilePathsSet = new Set(allPaths);
+  const buildZon = await loadZigBuildZon(repoPath || '');
+
+  // Build the global bool map from per-file worker output (already
+  // alias-chain-resolved by `buildZigBoolConstMap`).
+  const globalBoolMaps = new Map<string, ZigBoolConstMap>();
+  for (const { filePath, bools } of zigBoolMaps) {
+    globalBoolMaps.set(filePath, new Map(Object.entries(bools)));
+  }
+
+  // Resolve raw `@import("...")` paths to absolute file paths so
+  // `cfg.FOO` field lookups can hop into the imported file's bool map.
+  const globalAliasMaps = new Map<string, ZigImportAliasMap>();
+  for (const { filePath, aliases } of zigRawAliases) {
+    const resolved = new Map<string, string>();
+    for (const [alias, importPath] of Object.entries(aliases)) {
+      const target = resolveZigImportInternal(filePath, importPath, allFilePathsSet, buildZon);
+      if (target) resolved.set(alias, target);
+    }
+    if (resolved.size > 0) globalAliasMaps.set(filePath, resolved);
+  }
+
+  // If no aliases hop anywhere (e.g. every Zig file is self-contained),
+  // there's nothing the cross-file pass can prove that the worker
+  // didn't already prove file-locally.  Bail before re-parsing.
+  if (globalAliasMaps.size === 0) return;
+
+  // Group calls by file so we re-parse each file once.
+  const callsByFile = new Map<string, ExtractedCall[]>();
+  for (const call of extractedCalls) {
+    if (call.zigCallPos === undefined) continue;
+    if (call.staticGated === true) continue; // worker already proved it
+    const aliasMap = globalAliasMaps.get(call.filePath);
+    if (!aliasMap) continue; // file has no aliases → no cross-file work
+    let bucket = callsByFile.get(call.filePath);
+    if (!bucket) {
+      bucket = [];
+      callsByFile.set(call.filePath, bucket);
+    }
+    bucket.push(call);
+  }
+
+  if (callsByFile.size === 0) return;
+
+  // Re-parse each implicated file with a fresh tree-sitter parser
+  // and resolve each call's gating with cross-file context.
+  await loadLanguage(SupportedLanguages.Zig);
+  const parser = await loadParser();
+  const lookup = (p: string) => globalBoolMaps.get(p);
+
+  for (const [filePath, calls] of callsByFile) {
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, 'utf-8');
+    } catch {
+      continue; // file unreadable — skip
+    }
+    let tree;
+    try {
+      tree = parser.parse(content);
+    } catch {
+      continue;
+    }
+    if (!tree) continue;
+
+    const localBools = globalBoolMaps.get(filePath) ?? new Map();
+    const aliasMap = globalAliasMaps.get(filePath) ?? new Map();
+
+    // Build a position → call-node map by walking the tree once.
+    const callNodes = new Map<number, any>();
+    collectZigCallNodes(tree.rootNode, callNodes);
+
+    for (const call of calls) {
+      const node = callNodes.get(call.zigCallPos!);
+      if (!node) continue;
+      if (isCallStaticGated(node, localBools, aliasMap, lookup)) {
+        call.staticGated = true;
+      }
+    }
+  }
+}
+
+/**
+ * Recursively collect every `call_expression` in a Zig syntax tree
+ * keyed by its byte offset.  Used to pair `ExtractedCall.zigCallPos`
+ * back to a tree-sitter node during the cross-file gating pass.
+ */
+function collectZigCallNodes(node: any, out: Map<number, any>): void {
+  if (node.type === 'call_expression') {
+    out.set(node.startIndex, node);
+  }
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const c = node.namedChild(i);
+    if (c) collectZigCallNodes(c, out);
+  }
+}
+
+/**
+ * Build a `ZigCrossFileGatingContext` for the sequential
+ * `processCalls` path.  The empty `globalBoolMaps` is populated by
+ * `processCalls` itself during its prepare loop — see the
+ * `zigCrossFileGating?.globalBoolMaps.set(...)` call there.
+ */
+export async function buildSequentialZigCrossFileContext(
+  allPaths: string[],
+  repoPath: string,
+): Promise<ZigCrossFileGatingContext> {
+  return {
+    allFilePaths: new Set(allPaths),
+    buildZon: await loadZigBuildZon(repoPath || ''),
+    globalBoolMaps: new Map<string, ZigBoolConstMap>(),
   };
 }

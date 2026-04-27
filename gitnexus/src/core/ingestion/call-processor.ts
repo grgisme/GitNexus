@@ -40,10 +40,34 @@ import { getLanguageFromFilename, SupportedLanguages } from 'gitnexus-shared';
 import { isRegistryPrimary } from './registry-primary-flag.js';
 import {
   buildZigBoolConstMap,
+  buildZigImportAliasMap,
   isCallStaticGated,
   type ZigBoolConstMap,
   type ZigImportAliasMap,
 } from './call-extractors/zig-static-gating.js';
+import type { ZigBuildZonConfig } from './language-config.js';
+
+/**
+ * Cross-file Zig static-gating context, plumbed through `processCalls`
+ * and `processCallsFromExtracted` to enable `cfg.FOO` resolution
+ * across `@import` boundaries.
+ *
+ *   - `allFilePaths` is the set of every parseable file in the repo,
+ *     used by the import resolver to find `@import("./cfg.zig")` etc.
+ *   - `buildZon` is the parsed `build.zig.zon` for resolving package-
+ *     dep imports (`.path` deps from PR #1096).
+ *   - `globalBoolMaps` is the union of every Zig file's known-bool
+ *     map, keyed by absolute file path.  Built upstream by the parse
+ *     pipeline so each call resolution can do `cfg.FOO` cross-file
+ *     lookup in O(1).  `processCalls` will populate it itself if the
+ *     supplied map is empty (the sequential code path has the ASTs
+ *     in hand and can do a cheap pre-pass over Zig files).
+ */
+export interface ZigCrossFileGatingContext {
+  readonly allFilePaths: Set<string>;
+  readonly buildZon: ZigBuildZonConfig | null | undefined;
+  readonly globalBoolMaps: Map<string, ZigBoolConstMap>;
+}
 import { isVerboseIngestionEnabled } from './utils/verbose.js';
 import { yieldToEventLoop } from './utils/event-loop.js';
 import {
@@ -712,6 +736,13 @@ export const processCalls = async (
   importedRawReturnTypesMap?: ReadonlyMap<string, ReadonlyMap<string, string>>,
   heritageMap?: HeritageMap,
   bindingAccumulator?: BindingAccumulator,
+  /**
+   * v2: cross-file Zig static-gating context.  Optional — without it,
+   * `cfg.FOO` patterns degrade to file-local gating only (the v1
+   * behavior).  Built by the orchestrator from per-file bool maps and
+   * the project's `build.zig.zon`.
+   */
+  zigCrossFileGating?: ZigCrossFileGatingContext,
 ): Promise<ExtractedHeritage[]> => {
   const parser = await loadParser();
   const collectedHeritage: ExtractedHeritage[] = [];
@@ -861,6 +892,18 @@ export const processCalls = async (
     }
 
     prepared.push({ file, language, provider, tree, matches, parentMap, typeEnv });
+
+    // v2 cross-file Zig gating: populate the global bool map during
+    // the prep pass so the resolution pass below can do `cfg.FOO`
+    // lookups in O(1) without a second parse.  Idempotent: skip if
+    // the orchestrator pre-populated this entry from a previous chunk.
+    if (
+      language === SupportedLanguages.Zig &&
+      zigCrossFileGating !== undefined &&
+      !zigCrossFileGating.globalBoolMaps.has(file.path)
+    ) {
+      zigCrossFileGating.globalBoolMaps.set(file.path, buildZigBoolConstMap(tree.rootNode));
+    }
   }
 
   // ── Resolution loop: verify constructor bindings and resolve calls ──
@@ -891,15 +934,33 @@ export const processCalls = async (
     ctx.enableCache(file.path);
     const widenCache: WidenCache = new Map();
 
-    // Zig static-gating (file-local scope, v1): build the file's
-    // known-bool table once so each call-edge emission can ask
-    // whether it's inside an `if (CONST_FALSE)` branch.  Other
-    // languages get `undefined` and skip the check entirely.
+    // Zig static-gating: build the file's known-bool table once so
+    // each call-edge emission can ask whether it's inside an
+    // `if (CONST_FALSE)` branch.  Other languages get `undefined` and
+    // skip the check entirely.
+    //
+    // v2: when a `zigCrossFileGating` context is supplied, also build
+    // the per-file `@import` alias map and route cross-file lookups
+    // through the global bool table.  The alias map needs the global
+    // file list + build.zig.zon to resolve `@import("./cfg.zig")` to
+    // an absolute path; without the context we fall back to v1's
+    // file-local-only behavior.
     const zigStaticGatingBools: ZigBoolConstMap | undefined =
       language === SupportedLanguages.Zig
         ? buildZigBoolConstMap(tree.rootNode)
         : undefined;
-    const zigEmptyAliases: ZigImportAliasMap = new Map();
+    const zigImportAliases: ZigImportAliasMap =
+      language === SupportedLanguages.Zig && zigCrossFileGating !== undefined
+        ? buildZigImportAliasMap(
+            tree.rootNode,
+            file.path,
+            zigCrossFileGating.allFilePaths,
+            zigCrossFileGating.buildZon,
+          )
+        : new Map();
+    const zigBoolLookup = zigCrossFileGating
+      ? (p: string) => zigCrossFileGating.globalBoolMaps.get(p)
+      : () => undefined;
 
     matches.forEach((match) => {
       const captureMap: Record<string, any> = {};
@@ -1320,7 +1381,7 @@ export const processCalls = async (
       // `zigStaticGatingBools` is undefined for them.
       const staticGated =
         zigStaticGatingBools !== undefined
-          ? isCallStaticGated(callNode, zigStaticGatingBools, zigEmptyAliases, () => undefined)
+          ? isCallStaticGated(callNode, zigStaticGatingBools, zigImportAliases, zigBoolLookup)
           : false;
 
       graph.addRelationship({

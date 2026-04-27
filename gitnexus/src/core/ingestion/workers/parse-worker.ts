@@ -82,6 +82,7 @@ import type { LanguageProvider } from '../language-provider.js';
 import type { ParsedFile } from 'gitnexus-shared';
 import {
   buildZigBoolConstMap,
+  buildZigRawImportAliasMap,
   isCallStaticGated,
   type ZigBoolConstMap,
   type ZigImportAliasMap,
@@ -174,6 +175,11 @@ export interface ExtractedCall {
    *  known at index time to be unreachable. Threaded to the
    *  emitted CALLS edge as `GraphRelationship.staticGated`. */
   staticGated?: boolean;
+  /** Byte offset of the call expression in the source file. Emitted
+   *  for Zig calls only — used by the v2 cross-file static-gating
+   *  post-pass to pair an `ExtractedCall` back to its AST node when
+   *  re-parsing the Zig file with the global bool/alias context. */
+  zigCallPos?: number;
 }
 
 export interface ExtractedAssignment {
@@ -291,6 +297,18 @@ export interface ParseWorkerResult {
    * finalize-orchestrator.
    */
   parsedFiles: ParsedFile[];
+  /**
+   * Per-file Zig static-gating metadata, used by the cross-file
+   * gating post-pass in `parse-impl.ts`.  Two parallel arrays:
+   *   - `zigBoolMaps`: each Zig file's known-bool table.
+   *   - `zigRawImportAliases`: each Zig file's `@import("...")` alias
+   *     map (unresolved import-path strings — the main thread resolves
+   *     them via `resolveZigImportInternal` once it has the full file
+   *     list and `build.zig.zon` in hand).
+   * Both arrays are empty for non-Zig workloads.
+   */
+  zigBoolMaps: Array<{ filePath: string; bools: Record<string, boolean> }>;
+  zigRawImportAliases: Array<{ filePath: string; aliases: Record<string, string> }>;
   skippedLanguages: Record<string, number>;
   fileCount: number;
 }
@@ -751,6 +769,8 @@ const processBatch = (
     constructorBindings: [],
     fileScopeBindings: [],
     parsedFiles: [],
+    zigBoolMaps: [],
+    zigRawImportAliases: [],
     skippedLanguages: {},
     fileCount: 0,
   };
@@ -1441,14 +1461,35 @@ const processFileGroup = (
     // Zig static-gating context: build the file-local known-bool
     // table once per file so the call-extraction loop can stamp
     // edges originating in `if (CONST_FALSE)` branches with
-    // `staticGated: true`.  v1 is file-local only; cross-file alias
-    // resolution is wired but unused (we'd need to plumb the global
-    // file list + build.zig.zon into this worker to enable it).
+    // `staticGated: true`.
+    //
+    // v2: also emit the per-file bool table and the raw `@import`
+    // alias map so the main thread can run a cross-file gating pass
+    // afterwards (worker doesn't have the full file list /
+    // build.zig.zon needed to resolve import paths).  File-local
+    // resolution still runs here so a no-cross-file build is correct
+    // standalone.
     const zigStaticGatingBools: ZigBoolConstMap | undefined =
       language === SupportedLanguages.Zig
         ? buildZigBoolConstMap(tree.rootNode)
         : undefined;
     const zigEmptyAliases: ZigImportAliasMap = new Map();
+
+    if (language === SupportedLanguages.Zig && zigStaticGatingBools !== undefined) {
+      // Materialize as plain objects — `Map` doesn't structured-clone
+      // efficiently across worker postMessage and the consumer wants
+      // O(1) hash lookup anyway.
+      const bools: Record<string, boolean> = Object.create(null);
+      for (const [k, v] of zigStaticGatingBools) bools[k] = v;
+      result.zigBoolMaps.push({ filePath: file.path, bools });
+
+      const rawAliases = buildZigRawImportAliasMap(tree.rootNode);
+      if (rawAliases.size > 0) {
+        const aliases: Record<string, string> = Object.create(null);
+        for (const [k, v] of rawAliases) aliases[k] = v;
+        result.zigRawImportAliases.push({ filePath: file.path, aliases });
+      }
+    }
 
     // RFC #909 Ring 2: produce a `ParsedFile` for the new scope-based
     // resolution pipeline. No-op (returns undefined) for every language
@@ -1961,6 +2002,9 @@ const processFileGroup = (
                     : {}),
                   ...(argTypes !== undefined ? { argTypes } : {}),
                   ...(staticGated ? { staticGated: true } : {}),
+                  ...(language === SupportedLanguages.Zig
+                    ? { zigCallPos: callNode.startIndex }
+                    : {}),
                 });
               }
             }
@@ -2362,6 +2406,8 @@ let accumulated: ParseWorkerResult = {
   constructorBindings: [],
   fileScopeBindings: [],
   parsedFiles: [],
+  zigBoolMaps: [],
+  zigRawImportAliases: [],
   skippedLanguages: {},
   fileCount: 0,
 };
@@ -2390,6 +2436,8 @@ const mergeResult = (target: ParseWorkerResult, src: ParseWorkerResult) => {
   appendAll(target.constructorBindings, src.constructorBindings);
   appendAll(target.fileScopeBindings, src.fileScopeBindings);
   appendAll(target.parsedFiles, src.parsedFiles);
+  appendAll(target.zigBoolMaps, src.zigBoolMaps);
+  appendAll(target.zigRawImportAliases, src.zigRawImportAliases);
   for (const [lang, count] of Object.entries(src.skippedLanguages)) {
     target.skippedLanguages[lang] = (target.skippedLanguages[lang] || 0) + count;
   }
@@ -2442,6 +2490,8 @@ parentPort!.on('message', (msg: WorkerIncomingMessage) => {
         constructorBindings: [],
         fileScopeBindings: [],
         parsedFiles: [],
+        zigBoolMaps: [],
+        zigRawImportAliases: [],
         skippedLanguages: {},
         fileCount: 0,
       };

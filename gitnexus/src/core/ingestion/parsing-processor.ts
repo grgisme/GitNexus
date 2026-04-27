@@ -72,6 +72,10 @@ export interface WorkerExtractedData {
    * finalize-orchestrator.
    */
   parsedFiles: ParsedFile[];
+  /** v2 Zig static-gating: per-file known-bool tables emitted by workers. */
+  zigBoolMaps: Array<{ filePath: string; bools: Record<string, boolean> }>;
+  /** v2 Zig static-gating: per-file raw `@import` alias maps emitted by workers. */
+  zigRawImportAliases: Array<{ filePath: string; aliases: Record<string, string> }>;
 }
 
 // ============================================================================
@@ -107,6 +111,8 @@ const processParsingWithWorkers = async (
       constructorBindings: [],
       fileScopeBindings: [],
       parsedFiles: [],
+      zigBoolMaps: [],
+      zigRawImportAliases: [],
     };
 
   const total = files.length;
@@ -132,6 +138,9 @@ const processParsingWithWorkers = async (
   const allConstructorBindings: FileConstructorBindings[] = [];
   const fileScopeBindingsByFile: FileScopeBindings[] = [];
   const allParsedFiles: ParsedFile[] = [];
+  const allZigBoolMaps: Array<{ filePath: string; bools: Record<string, boolean> }> = [];
+  const allZigRawImportAliases: Array<{ filePath: string; aliases: Record<string, string> }> =
+    [];
   for (const result of chunkResults) {
     for (const node of result.nodes) {
       graph.addNode({
@@ -174,6 +183,10 @@ const processParsingWithWorkers = async (
     // partial rollouts), since the additive contract means undefined =
     // "this worker produced no ParsedFiles for this chunk".
     if (result.parsedFiles) for (const item of result.parsedFiles) allParsedFiles.push(item);
+    if (result.zigBoolMaps) for (const item of result.zigBoolMaps) allZigBoolMaps.push(item);
+    if (result.zigRawImportAliases) {
+      for (const item of result.zigRawImportAliases) allZigRawImportAliases.push(item);
+    }
   }
 
   // Merge and log skipped languages from workers
@@ -205,6 +218,8 @@ const processParsingWithWorkers = async (
     constructorBindings: allConstructorBindings,
     fileScopeBindings: fileScopeBindingsByFile,
     parsedFiles: allParsedFiles,
+    zigBoolMaps: allZigBoolMaps,
+    zigRawImportAliases: allZigRawImportAliases,
   };
 };
 

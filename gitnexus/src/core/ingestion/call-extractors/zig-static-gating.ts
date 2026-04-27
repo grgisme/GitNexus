@@ -212,6 +212,60 @@ export function buildZigImportAliasMap(
   return out;
 }
 
+/**
+ * Worker-side variant of `buildZigImportAliasMap` that emits the raw
+ * `@import("...")` path strings without resolving them — workers don't
+ * have access to the global file list / build.zig.zon needed for path
+ * resolution.  The main thread later resolves each entry via
+ * `resolveZigImportInternal` when aggregating cross-file gating context.
+ *
+ *   `const cfg = @import("./cfg.zig");`  →  Map { 'cfg' → './cfg.zig' }
+ */
+export function buildZigRawImportAliasMap(rootNode: SyntaxNode): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  for (const child of rootNode.namedChildren) {
+    if (child.type !== 'variable_declaration') continue;
+    const entry = extractRawImportAlias(child);
+    if (entry) out.set(entry.name, entry.importPath);
+  }
+  return out;
+}
+
+function extractRawImportAlias(decl: SyntaxNode): { name: string; importPath: string } | null {
+  let isConst = false;
+  let isVar = false;
+  for (let i = 0; i < decl.childCount; i++) {
+    const c = decl.child(i);
+    if (!c || c.isNamed) continue;
+    if (c.type === 'const') isConst = true;
+    else if (c.type === 'var') isVar = true;
+  }
+  if (!isConst || isVar) return null;
+
+  let name: string | undefined;
+  let importPath: string | undefined;
+
+  for (const c of decl.namedChildren) {
+    if (c.type === 'identifier' && name === undefined) {
+      name = c.text;
+      continue;
+    }
+    if (c.type === 'builtin_function') {
+      const ident = c.namedChildren.find((cc) => cc.type === 'builtin_identifier');
+      if (!ident || ident.text !== '@import') continue;
+      const args = c.namedChildren.find((cc) => cc.type === 'arguments');
+      if (!args) continue;
+      const str = args.namedChildren.find((cc) => cc.type === 'string');
+      if (!str) continue;
+      const content = str.namedChildren.find((cc) => cc.type === 'string_content');
+      if (content) importPath = content.text;
+    }
+  }
+
+  if (name === undefined || importPath === undefined) return null;
+  return { name, importPath };
+}
+
 function extractImportAlias(
   decl: SyntaxNode,
   currentFilePath: string,

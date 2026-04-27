@@ -7,6 +7,9 @@
 //   - All callees (`gated_*` and `live_*`) live in the same file so the
 //     CALLS edges resolve cleanly.
 
+// Cross-file alias — should resolve `cfg.FOO`, `cfg.BAR` against cfg.zig.
+const cfg = @import("./cfg.zig");
+
 pub const UPGRADERS_ENABLED: bool = false;
 pub const DEBUG: bool = true;
 pub const FEATURE_X: bool = false;
@@ -140,6 +143,25 @@ pub fn run() void {
     } else {
         gated_chain_tail();
     }
+
+    // Cross-file flag resolution: `cfg.FOO == false` (defined in cfg.zig).
+    if (cfg.FOO) {
+        gated_cross_file_foo();
+    }
+    // Cross-file: `cfg.BAR == true` — THEN branch is live, ELSE branch is gated.
+    if (cfg.BAR) {
+        live_cross_file_bar();
+    } else {
+        gated_cross_file_else();
+    }
+    // Cross-file unknown member: `cfg.UNDEFINED_NAME` resolves to unknown.
+    if (cfg.UNDEFINED_NAME) {
+        live_cross_file_undefined();
+    }
+    // Cross-file non-bool: `cfg.NOT_A_BOOL` is an i32 — must NOT resolve.
+    if (cfg.NOT_A_BOOL != 0) {
+        live_cross_file_not_bool();
+    }
 }
 
 fn live_unconditional() void {
@@ -247,6 +269,26 @@ fn live_chain_mid() void {
 }
 
 fn gated_chain_tail() void {
+    _ = 1;
+}
+
+fn gated_cross_file_foo() void {
+    _ = 1;
+}
+
+fn live_cross_file_bar() void {
+    _ = 1;
+}
+
+fn gated_cross_file_else() void {
+    _ = 1;
+}
+
+fn live_cross_file_undefined() void {
+    _ = 1;
+}
+
+fn live_cross_file_not_bool() void {
     _ = 1;
 }
 
