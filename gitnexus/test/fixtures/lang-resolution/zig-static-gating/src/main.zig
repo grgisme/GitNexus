@@ -14,6 +14,18 @@ pub const FEATURE_X: bool = false;
 // the initial value is `false`.  `live_under_var` below must stay live.
 pub var IS_RUNTIME_FLAG_FALSE: bool = false;
 
+// Re-aliased const chains. v2: walk up to 5 hops, fold to the literal
+// at the chain root.
+pub const ALIAS_ONE = UPGRADERS_ENABLED;     // → false (1 hop)
+pub const ALIAS_TWO = ALIAS_ONE;             // → false (2 hops)
+pub const ALIAS_THREE = ALIAS_TWO;           // → false (3 hops)
+pub const ALIAS_TO_UNKNOWN = NOT_DEFINED_ANYWHERE; // → unknown
+// Cycle: A→B→A. Both bail to unknown.
+pub const CYCLE_A = CYCLE_B;
+pub const CYCLE_B = CYCLE_A;
+// Alias to a `var` — must NOT resolve (var is not a comptime constant).
+pub const ALIAS_TO_VAR = IS_RUNTIME_FLAG_FALSE;
+
 pub fn run() void {
     // Live: not under any if-gate.
     live_unconditional();
@@ -80,6 +92,29 @@ pub fn run() void {
     if (false == UPGRADERS_ENABLED) {
         live_sym_eq();
     }
+
+    // Re-aliased const chains. ALIAS_ONE=ALIAS_TWO=ALIAS_THREE all fold to false.
+    if (ALIAS_ONE) {
+        gated_alias_one();
+    }
+    if (ALIAS_TWO) {
+        gated_alias_two();
+    }
+    if (ALIAS_THREE) {
+        gated_alias_three();
+    }
+    // Alias to unknown: must NOT resolve.
+    if (ALIAS_TO_UNKNOWN) {
+        live_alias_to_unknown();
+    }
+    // Cycle: must NOT resolve, do not infinite-loop.
+    if (CYCLE_A) {
+        live_alias_cycle();
+    }
+    // Alias to `var`: must NOT resolve (var is mutable global).
+    if (ALIAS_TO_VAR) {
+        live_alias_to_var();
+    }
 }
 
 fn live_unconditional() void {
@@ -135,6 +170,30 @@ fn gated_neq_true() void {
 }
 
 fn live_sym_eq() void {
+    _ = 1;
+}
+
+fn gated_alias_one() void {
+    _ = 1;
+}
+
+fn gated_alias_two() void {
+    _ = 1;
+}
+
+fn gated_alias_three() void {
+    _ = 1;
+}
+
+fn live_alias_to_unknown() void {
+    _ = 1;
+}
+
+fn live_alias_cycle() void {
+    _ = 1;
+}
+
+fn live_alias_to_var() void {
     _ = 1;
 }
 

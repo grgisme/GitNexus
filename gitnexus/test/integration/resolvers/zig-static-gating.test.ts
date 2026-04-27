@@ -82,4 +82,28 @@ describe('Zig static-gated edges', () => {
   it('does NOT tag `if (false == FOO)` when FOO is false (provably TRUE)', () => {
     expect(isGated('live_sym_eq')).toBe(false);
   });
+
+  it('tags re-aliased const chain (1 hop)', () => {
+    expect(isGated('gated_alias_one')).toBe(true);
+  });
+
+  it('tags re-aliased const chain (2 hops)', () => {
+    expect(isGated('gated_alias_two')).toBe(true);
+  });
+
+  it('tags re-aliased const chain (3 hops)', () => {
+    expect(isGated('gated_alias_three')).toBe(true);
+  });
+
+  it('does NOT tag alias chain that exits to unknown identifier', () => {
+    expect(isGated('live_alias_to_unknown')).toBe(false);
+  });
+
+  it('does NOT tag (and does not infinite-loop on) alias cycles', () => {
+    expect(isGated('live_alias_cycle')).toBe(false);
+  });
+
+  it('does NOT tag alias whose chain root is a `var` (not a const)', () => {
+    expect(isGated('live_alias_to_var')).toBe(false);
+  });
 });

@@ -75,29 +75,79 @@ export type ZigBoolConstLookup = (filePath: string) => ZigBoolConstMap | undefin
 // Phase 2: per-file extraction
 // ---------------------------------------------------------------------------
 
+/** Cap on alias-chain hops walked when resolving `const A = B; const B = C; ...`. */
+const MAX_ALIAS_HOPS = 5;
+
 /**
  * Walk the top-level of a Zig source file and collect known-bool
- * constants.  Only `variable_declaration` nodes with an immediate
- * `boolean` child as the RHS qualify.
+ * constants.  Two passes:
  *
- * The function is intentionally permissive about modifier tokens
- * (`pub`, `const`, optional type annotation): we look at the named
- * children of the `variable_declaration` and pick out (a) the first
- * `identifier` (the name) and (b) a direct `boolean` child (the
- * value).  Any other shape — a call, field access, struct literal —
- * yields no entry.
+ *   Pass 1: collect every top-level `const X = <expr>` where the RHS
+ *           is either a `boolean` literal (recorded in `literals`) or
+ *           a single `identifier` (recorded in `aliases`).
+ *   Pass 2: walk each alias entry up to `MAX_ALIAS_HOPS` hops; if the
+ *           chain terminates at a known-bool literal, record `X` with
+ *           the literal's value. Cycles, chains exceeding the cap, and
+ *           chains exiting file scope (unknown identifier at the root)
+ *           bail to "unknown".
+ *
+ * Only `const` decls qualify (not `var`). The function is permissive
+ * about modifier tokens (`pub`, type annotation) — it reads only the
+ * identifier name and the RHS expression shape.
  */
 export function buildZigBoolConstMap(rootNode: SyntaxNode): ZigBoolConstMap {
-  const out = new Map<string, boolean>();
+  const literals = new Map<string, boolean>();
+  const aliases = new Map<string, string>();
   for (const child of rootNode.namedChildren) {
     if (child.type !== 'variable_declaration') continue;
-    const entry = extractBoolConst(child);
-    if (entry) out.set(entry.name, entry.value);
+    const entry = extractBoolConstOrAlias(child);
+    if (!entry) continue;
+    if (entry.kind === 'literal') {
+      literals.set(entry.name, entry.value);
+    } else {
+      aliases.set(entry.name, entry.aliasOf);
+    }
   }
-  return out;
+
+  // Pass 2: resolve alias chains.
+  for (const [name, target] of aliases) {
+    const resolved = resolveAliasChain(name, target, literals, aliases);
+    if (resolved !== undefined) {
+      literals.set(name, resolved);
+    }
+  }
+
+  return literals;
 }
 
-function extractBoolConst(decl: SyntaxNode): { name: string; value: boolean } | null {
+function resolveAliasChain(
+  start: string,
+  firstTarget: string,
+  literals: ReadonlyMap<string, boolean>,
+  aliases: ReadonlyMap<string, string>,
+): boolean | undefined {
+  // Walk: start → firstTarget → aliases.get(firstTarget) → ... up to MAX_ALIAS_HOPS.
+  // Cycle protection via a visited set seeded with `start` itself.
+  const visited = new Set<string>();
+  visited.add(start);
+  let current: string = firstTarget;
+  for (let hop = 0; hop < MAX_ALIAS_HOPS; hop++) {
+    if (visited.has(current)) return undefined; // cycle
+    visited.add(current);
+    const lit = literals.get(current);
+    if (lit !== undefined) return lit;
+    const next = aliases.get(current);
+    if (next === undefined) return undefined; // chain exits file scope or hits unknown
+    current = next;
+  }
+  return undefined; // hop cap exceeded
+}
+
+type RawDecl =
+  | { kind: 'literal'; name: string; value: boolean }
+  | { kind: 'alias'; name: string; aliasOf: string };
+
+function extractBoolConstOrAlias(decl: SyntaxNode): RawDecl | null {
   // Require `const` and exclude `var`. tree-sitter-zig parses both with
   // the same `variable_declaration` shape; the qualifier is an anonymous
   // child token. A `pub var FOO = false;` is mutable global state — its
@@ -114,6 +164,7 @@ function extractBoolConst(decl: SyntaxNode): { name: string; value: boolean } | 
 
   let name: string | undefined;
   let value: boolean | undefined;
+  let aliasOf: string | undefined;
 
   for (const c of decl.namedChildren) {
     if (c.type === 'identifier' && name === undefined) {
@@ -124,12 +175,16 @@ function extractBoolConst(decl: SyntaxNode): { name: string; value: boolean } | 
       const t = c.text;
       if (t === 'true') value = true;
       else if (t === 'false') value = false;
+    } else if (c.type === 'identifier' && name !== undefined && aliasOf === undefined) {
+      // Second `identifier` child is the RHS alias target:
+      //   `const B = A;`  → name='B', aliasOf='A'.
+      aliasOf = c.text;
     }
   }
 
-  if (name !== undefined && value !== undefined) {
-    return { name, value };
-  }
+  if (name === undefined) return null;
+  if (value !== undefined) return { kind: 'literal', name, value };
+  if (aliasOf !== undefined) return { kind: 'alias', name, aliasOf };
   return null;
 }
 
