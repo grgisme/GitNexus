@@ -1034,17 +1034,22 @@ export const fetchExistingEmbeddingHashes = async (
 };
 
 export const closeLbug = async (): Promise<void> => {
-  if (conn) {
-    try {
-      await conn.close();
-    } catch {}
-    conn = null;
-  }
+  // #11810: calling conn.close() and then db.close() on a loaded graph aborts the
+  // process natively ("free(): invalid pointer" / "double free or corruption") in
+  // @ladybugdb/core. db.close() alone exits cleanly (rc 0) and releases the
+  // connections it owns, so close the connection explicitly only when there is no
+  // db to close.
   if (db) {
     try {
       await db.close();
     } catch {}
     db = null;
+    conn = null;
+  } else if (conn) {
+    try {
+      await conn.close();
+    } catch {}
+    conn = null;
   }
   currentDbPath = null;
   ftsLoaded = false;
