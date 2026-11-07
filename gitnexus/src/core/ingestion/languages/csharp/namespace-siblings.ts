@@ -311,7 +311,7 @@ export function populateCsharpNamespaceSiblings(
           scopeBindings = new Map<string, BindingRef[]>();
           finalized.set(moduleScope.id, scopeBindings);
         }
-        const existing = scopeBindings.get(simpleName) ?? [];
+        const existing = [...(scopeBindings.get(simpleName) ?? [])];
         if (existing.some((b) => b.def.nodeId === memberDef.nodeId)) continue;
         existing.push({ def: memberDef, origin: 'import' });
         scopeBindings.set(simpleName, existing);
@@ -345,7 +345,7 @@ export function populateCsharpNamespaceSiblings(
           scopeBindings = new Map<string, BindingRef[]>();
           finalized.set(moduleScope.id, scopeBindings);
         }
-        const existing = scopeBindings.get(simpleName) ?? [];
+        const existing = [...(scopeBindings.get(simpleName) ?? [])];
         if (existing.some((b) => b.def.nodeId === def.nodeId)) continue;
         existing.push({ def, origin: 'namespace' });
         scopeBindings.set(simpleName, existing);
@@ -381,7 +381,7 @@ export function populateCsharpNamespaceSiblings(
         const local = bucket.scopes.find((s) => s.filePath === filePath)?.scope.bindings.get(name);
         if (local !== undefined && local.some((b) => b.origin === 'local')) continue;
 
-        const existing = scopeBindings.get(name) ?? [];
+        const existing = [...(scopeBindings.get(name) ?? [])];
         for (const def of defs) {
           if (def.filePath === filePath) continue; // don't self-reference
           if (existing.some((b) => b.def.nodeId === def.nodeId)) continue;
