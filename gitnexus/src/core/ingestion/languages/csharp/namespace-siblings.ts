@@ -30,6 +30,7 @@
  * coincidences).
  */
 
+import { getTreeSitterBufferSize } from '../../constants.js';
 import type { SyntaxNode } from 'tree-sitter';
 import type { BindingRef, ParsedFile, Scope, ScopeId, SymbolDefinition } from 'gitnexus-shared';
 import type { ScopeResolutionIndexes } from '../../model/scope-resolution-indexes.js';
@@ -52,7 +53,9 @@ interface CsharpFileStructure {
  *  shared across calls. */
 function extractFileStructure(content: string, cachedTree: unknown): CsharpFileStructure {
   type CsharpTree = ReturnType<ReturnType<typeof getCsharpParser>['parse']>;
-  const tree = (cachedTree as CsharpTree | undefined) ?? getCsharpParser().parse(content);
+  const tree = (cachedTree as CsharpTree | undefined) ?? getCsharpParser().parse(content, undefined, {
+      bufferSize: getTreeSitterBufferSize(content.length),
+    });
   const namespaces: string[] = [];
   const usingStaticPaths: string[] = [];
 

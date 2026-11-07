@@ -16,6 +16,7 @@
  * Pure given the input source text. No I/O, no globals consulted.
  */
 
+import { getTreeSitterBufferSize } from '../../constants.js';
 import type { Capture, CaptureMatch } from 'gitnexus-shared';
 import { findNodeAtRange, nodeToCapture, syntheticCapture } from '../../utils/ast-helpers.js';
 import { splitImportStatement } from './import-decomposer.js';
@@ -36,7 +37,9 @@ export function emitPythonScopeCaptures(
   // here at the use site.
   let tree = cachedTree as ReturnType<ReturnType<typeof getPythonParser>['parse']> | undefined;
   if (tree === undefined) {
-    tree = getPythonParser().parse(sourceText);
+    tree = getPythonParser().parse(sourceText, undefined, {
+      bufferSize: getTreeSitterBufferSize(sourceText.length),
+    });
     recordCacheMiss();
   } else {
     recordCacheHit();
