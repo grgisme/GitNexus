@@ -4,6 +4,7 @@
  * Tests: getStoragePath, getStoragePaths, readRegistry, registerRepo, unregisterRepo
  * Covers hardening fixes #29 (API key file permissions) and #30 (case-insensitive paths on Windows)
  */
+import { addToGitignore } from '../../src/storage/repo-manager.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import path from 'path';
 import os from 'os';
@@ -850,5 +851,52 @@ describe('registerRepo clone naming (#7771)', () => {
     const again = await registerRepo(b, meta);
     expect(again).toBe('reclaim-ue@c-two');
     expect(await listRegisteredRepos()).toHaveLength(2);
+  });
+});
+
+// ─── addToGitignore writes info/exclude, not .gitignore (#7771) ──────
+
+describe('addToGitignore (#7771)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gn-ign-'));
+  });
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('git repo: leaves tracked .gitignore alone, writes info/exclude once', async () => {
+    execSync('git init -q', { cwd: dir });
+    await fs.writeFile(path.join(dir, '.gitignore'), 'node_modules\n');
+    execSync('git add . && git -c user.email=a@b -c user.name=n commit -qm i', { cwd: dir });
+    await addToGitignore(dir);
+    await addToGitignore(dir);
+    expect(await fs.readFile(path.join(dir, '.gitignore'), 'utf-8')).toBe('node_modules\n');
+    const ex = await fs.readFile(path.join(dir, '.git', 'info', 'exclude'), 'utf-8');
+    expect(ex.split('\n').filter((l) => l === '.gitnexus')).toHaveLength(1);
+    expect(execSync('git status --short', { cwd: dir }).toString()).toBe('');
+  });
+
+  it('already ignored by .gitignore: writes nothing', async () => {
+    execSync('git init -q', { cwd: dir });
+    await fs.writeFile(path.join(dir, '.gitignore'), '.gitnexus\n');
+    await addToGitignore(dir);
+    const ex = await fs.readFile(path.join(dir, '.git', 'info', 'exclude'), 'utf-8');
+    expect(ex).not.toContain('.gitnexus');
+  });
+
+  it('worktree: writes the shared exclude path', async () => {
+    execSync('git init -q', { cwd: dir });
+    execSync('git -c user.email=a@b -c user.name=n commit -q --allow-empty -m i', { cwd: dir });
+    const wt = path.join(dir, 'wt');
+    execSync(`git worktree add -q ${wt}`, { cwd: dir });
+    await addToGitignore(wt);
+    expect(execSync('git status --short', { cwd: wt }).toString()).toBe('');
+    expect(execSync('git check-ignore .gitnexus', { cwd: wt }).toString().trim()).toBe('.gitnexus');
+  });
+
+  it('no git dir: falls back to .gitignore', async () => {
+    await addToGitignore(dir);
+    expect(await fs.readFile(path.join(dir, '.gitignore'), 'utf-8')).toBe('.gitnexus\n');
   });
 });

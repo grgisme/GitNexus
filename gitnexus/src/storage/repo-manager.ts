@@ -9,6 +9,7 @@
 import fs from 'fs/promises';
 import { realpathSync } from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import os from 'os';
 import { getInferredRepoName } from './git.js';
 
@@ -241,6 +242,51 @@ export const findRepo = async (startPath: string): Promise<IndexedRepo | null> =
  * Add .gitnexus to .gitignore if not already present
  */
 export const addToGitignore = async (repoPath: string): Promise<void> => {
+  // Prefer <git dir>/info/exclude so the tracked .gitignore stays clean
+  // (a modified .gitignore dirties lane clones). Falls back to .gitignore
+  // only when there is no git dir.
+  const git = (args: string[]): string | null => {
+    try {
+      return execFileSync('git', args, {
+        cwd: repoPath,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+      })
+        .toString()
+        .trim();
+    } catch {
+      return null;
+    }
+  };
+  const excludeRel = git(['rev-parse', '--git-path', 'info/exclude']);
+  if (excludeRel) {
+    try {
+      execFileSync('git', ['check-ignore', '-q', GITNEXUS_DIR], {
+        cwd: repoPath,
+        stdio: 'ignore',
+        timeout: 5000,
+      });
+      return; // already ignored
+    } catch {
+      /* exit 1 = not ignored; continue */
+    }
+    const excludePath = path.resolve(repoPath, excludeRel);
+    let cur = '';
+    try {
+      cur = await fs.readFile(excludePath, 'utf-8');
+    } catch {
+      /* missing: create */
+    }
+    if (cur.split(/\r?\n/).some((l) => l.trim() === GITNEXUS_DIR)) return;
+    await fs.mkdir(path.dirname(excludePath), { recursive: true });
+    await fs.writeFile(
+      excludePath,
+      cur === '' || cur.endsWith('\n') ? `${cur}${GITNEXUS_DIR}\n` : `${cur}\n${GITNEXUS_DIR}\n`,
+      'utf-8',
+    );
+    return;
+  }
+
   const gitignorePath = path.join(repoPath, '.gitignore');
 
   try {
