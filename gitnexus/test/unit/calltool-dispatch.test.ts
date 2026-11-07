@@ -7,7 +7,10 @@
  * These are pure unit tests that mock the LadybugDB layer to test
  * the dispatch and error handling logic in isolation.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 // We need to mock the LadybugDB adapter and repo-manager BEFORE importing LocalBackend.
 // local-backend.ts imports from core/lbug/pool-adapter.js; the mcp/core/lbug-adapter.js
@@ -706,6 +709,57 @@ describe('LocalBackend.resolveRepo', () => {
     await expect(backend.callTool('query', { query: 'test' })).rejects.toThrow(
       'Multiple repositories indexed',
     );
+  });
+
+  describe('cwd and path resolution (#7771)', () => {
+    const entry = (p: string) => ({
+      ...MOCK_REPO_ENTRY,
+      name: 'reclaim-ue',
+      path: p,
+      storagePath: `${p}/.gitnexus`,
+    });
+    let tmp: string;
+    let cwdSpy: any;
+
+    beforeEach(() => {
+      tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gn-cwd-')));
+      for (const d of ['one', 'two', 'out']) fs.mkdirSync(path.join(tmp, d), { recursive: true });
+      (listRegisteredRepos as any).mockResolvedValue([
+        entry(path.join(tmp, 'one')),
+        entry(path.join(tmp, 'two')),
+      ]);
+    });
+    afterEach(() => {
+      cwdSpy?.mockRestore();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it('cwd inside the second same-name repo picks that one', async () => {
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(path.join(tmp, 'two'));
+      await backend.init();
+      const h = await backend.resolveRepo();
+      expect(h.repoPath).toBe(path.join(tmp, 'two'));
+    });
+
+    it('cwd outside every repo keeps the old ambiguity error', async () => {
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(path.join(tmp, 'out'));
+      await backend.init();
+      await expect(backend.resolveRepo()).rejects.toThrow('Multiple repositories indexed');
+    });
+
+    it('an absolute path works as the repo parameter', async () => {
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(path.join(tmp, 'out'));
+      await backend.init();
+      const h = await backend.resolveRepo(path.join(tmp, 'one'));
+      expect(h.repoPath).toBe(path.join(tmp, 'one'));
+      const sub = await backend.resolveRepo(path.join(tmp, 'two'));
+      expect(sub.repoPath).toBe(path.join(tmp, 'two'));
+    });
+
+    it('an unregistered absolute path is not found', async () => {
+      await backend.init();
+      await expect(backend.resolveRepo(path.join(tmp, 'out'))).rejects.toThrow('not found');
+    });
   });
 
   it('resolves repo by name parameter', async () => {

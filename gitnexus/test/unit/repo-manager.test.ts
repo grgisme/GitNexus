@@ -254,7 +254,7 @@ describe('registerRepo name override + collision guard (#829)', () => {
     expect(paths).toEqual([path.resolve(tmpRepoA.dbPath), path.resolve(tmpRepoB.dbPath)].sort());
   });
 
-  it('basename collisions without an explicit --name still register silently (backward-compat)', async () => {
+  it('basename collisions without an explicit --name still register without throwing; the later one is disambiguated (#7771)', async () => {
     // Create two sibling dirs whose basenames collide. Neither caller
     // passes { name }, so the guard must NOT fire — this preserves the
     // pre-#829 behaviour for users who don't know about --name yet.
@@ -273,7 +273,7 @@ describe('registerRepo name override + collision guard (#829)', () => {
       const entries = await listRegisteredRepos();
       expect(entries).toHaveLength(2);
       expect(entries[0].name).toBe(sharedBasename);
-      expect(entries[1].name).toBe(sharedBasename);
+      expect(entries[1].name).toBe(`${sharedBasename}@${sharedBasename}`);
     } finally {
       await parentA.cleanup();
       await parentB.cleanup();
@@ -789,5 +789,66 @@ describe('assertSafeStoragePath (#1003)', () => {
     };
     // Should accept because Windows paths are case-insensitive.
     expect(() => assertSafeStoragePath(entry)).not.toThrow();
+  });
+});
+
+// ─── same-repo clones get distinct names (#7771) ─────────────────────
+
+describe('registerRepo clone naming (#7771)', () => {
+  let tmpHome: Awaited<ReturnType<typeof createTempDir>>;
+  let parent: Awaited<ReturnType<typeof createTempDir>>;
+  let saved: string | undefined;
+  const meta: RepoMeta = {
+    repoPath: '',
+    lastCommit: 'abc1234',
+    indexedAt: '2026-04-18T12:00:00.000Z',
+    stats: { files: 1, nodes: 1 },
+  };
+
+  beforeEach(async () => {
+    tmpHome = await createTempDir('gitnexus-clone-home-');
+    parent = await createTempDir('gitnexus-clone-parent-');
+    saved = process.env.GITNEXUS_HOME;
+    process.env.GITNEXUS_HOME = tmpHome.dbPath;
+  });
+  afterEach(async () => {
+    if (saved === undefined) delete process.env.GITNEXUS_HOME;
+    else process.env.GITNEXUS_HOME = saved;
+    await tmpHome.cleanup();
+    await parent.cleanup();
+  });
+
+  const mk = async (name: string, remote?: string) => {
+    const d = path.join(parent.dbPath, name);
+    await fs.mkdir(d, { recursive: true });
+    if (remote) {
+      const { execFileSync } = await import('child_process');
+      execFileSync('git', ['init', '-q'], { cwd: d });
+      execFileSync('git', ['remote', 'add', 'origin', remote], { cwd: d });
+    }
+    return d;
+  };
+
+  it('second clone of one remote registers as <name>@<basename>; first stays readable', async () => {
+    const remote = 'https://example.com/acme/reclaim-ue.git';
+    const a = await mk('reclaim-ue-procgen', remote);
+    const b = await mk('reclaim-ue-qa', remote);
+    const n1 = await registerRepo(a, meta);
+    const n2 = await registerRepo(b, meta);
+    expect(n1).toBe('reclaim-ue');
+    expect(n2).toBe('reclaim-ue@reclaim-ue-qa');
+    const entries = await listRegisteredRepos();
+    expect(entries.map((e) => e.name).sort()).toEqual(['reclaim-ue', 'reclaim-ue@reclaim-ue-qa']);
+  });
+
+  it('re-registering the disambiguated clone keeps its name (not treated as a custom alias)', async () => {
+    const remote = 'https://example.com/acme/reclaim-ue.git';
+    const a = await mk('c-one', remote);
+    const b = await mk('c-two', remote);
+    await registerRepo(a, meta);
+    await registerRepo(b, meta);
+    const again = await registerRepo(b, meta);
+    expect(again).toBe('reclaim-ue@c-two');
+    expect(await listRegisteredRepos()).toHaveLength(2);
   });
 });

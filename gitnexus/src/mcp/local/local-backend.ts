@@ -8,6 +8,7 @@
 
 import fs from 'fs/promises';
 import path from 'path';
+import { looksLikePath, pickByCwd, pickDeepestContaining } from './repo-path-match.js';
 import {
   initLbug,
   executeQuery,
@@ -404,10 +405,17 @@ export class LocalBackend {
       for (const handle of this.repos.values()) {
         if (handle.name.toLowerCase() === paramLower) return handle;
       }
-      // Match by path (substring)
+      // Match by path: exact first, then the deepest registered repo that
+      // contains the given path (so `-r <abs path>` works, also for a
+      // subdirectory of a clone).
       const resolved = path.resolve(repoParam);
       for (const handle of this.repos.values()) {
         if (handle.repoPath === resolved) return handle;
+      }
+      if (looksLikePath(repoParam)) {
+        const hit = pickDeepestContaining(this.repos.values(), resolved);
+        if (hit) return hit;
+        return null;
       }
       // Match by partial name
       for (const handle of this.repos.values()) {
@@ -416,11 +424,25 @@ export class LocalBackend {
       return null;
     }
 
+    // No param: the repo whose registered path contains the cwd (git
+    // toplevel first, deepest match wins). Lets several clones of one repo
+    // coexist without `-r`.
+    let cwd: string | null = null;
+    try {
+      cwd = process.cwd();
+    } catch {
+      cwd = null;
+    }
+    if (cwd) {
+      const byCwd = pickByCwd(this.repos.values(), cwd);
+      if (byCwd) return byCwd;
+    }
+
     if (this.repos.size === 1) {
       return this.repos.values().next().value!;
     }
 
-    return null; // Multiple repos, no param — ambiguous
+    return null; // Multiple repos, none contain the cwd: ambiguous
   }
 
   // ─── Lazy LadybugDB Init ────────────────────────────────────────────

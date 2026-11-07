@@ -365,8 +365,12 @@ export class RegistryNameCollisionError extends Error {
  *  avoid a second `git config` subprocess invocation. */
 const hasCustomAlias = (entry: RegistryEntry, inferredName: string | null): boolean => {
   const resolved = path.resolve(entry.path);
-  if (entry.name === path.basename(resolved)) return false;
+  const base = path.basename(resolved);
+  if (entry.name === base) return false;
   if (inferredName && entry.name === inferredName) return false;
+  // Auto-disambiguated clone name (`<name>@<basename>`) is not a user alias.
+  if (entry.name === `${base}@${base}`) return false;
+  if (inferredName && entry.name === `${inferredName}@${base}`) return false;
   return true;
 };
 
@@ -457,6 +461,19 @@ export const registerRepo = async (
   // they still register, and the user sees the ambiguity at `-r` / `list`
   // resolution time (which is already improved by the disambiguated error
   // messages and list output #829 ships).
+  // Clones of one repo: when an auto-derived name is already registered for
+  // a DIFFERENT path, register as `<name>@<basename of path>` so `-r <name>`
+  // targets are distinct. Existing entries are left untouched.
+  if (opts?.name === undefined && !isPreservedAlias) {
+    const clash = entries.some(
+      (e, i) =>
+        i !== existingIdx &&
+        e.name.toLowerCase() === name.toLowerCase() &&
+        canonicalizePath(e.path) !== canonicalInput,
+    );
+    if (clash) name = `${name}@${path.basename(resolved)}`;
+  }
+
   const explicitName = opts?.name !== undefined || isPreservedAlias;
   if (explicitName && !opts?.allowDuplicateName) {
     // Compare canonical-vs-canonical here too so `/var/foo` and
