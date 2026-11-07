@@ -337,8 +337,11 @@ export async function generateAIContextFiles(
   }
 
   // Install skills to .claude/skills/gitnexus/
-  const installedSkills = await installSkills(repoPath);
-  if (installedSkills.length > 0) {
+  // --skip-agents-md also skips the skills dir (the repo gets no agent files).
+  const installedSkills = options?.skipAgentsMd ? [] : await installSkills(repoPath);
+  if (options?.skipAgentsMd) {
+    createdFiles.push('.claude/skills/gitnexus/ (skipped via --skip-agents-md)');
+  } else if (installedSkills.length > 0) {
     createdFiles.push(`.claude/skills/gitnexus/ (${installedSkills.length} skills)`);
   }
 

@@ -280,12 +280,22 @@ export async function runFullAnalysis(
     });
 
     // ── Phase 3: FTS (85–90%) ─────────────────────────────────────────
-    // FTS indexes are created lazily on first `query`/`context` call instead
-    // of eagerly here. On small repos / CI runners the LadybugDB
-    // CREATE_FTS_INDEX cost is ~440 ms × 5 (≈2 s) regardless of table size,
-    // which dominated `analyze` runtime and pushed Windows CI past its
-    // 30 s test budget. Lazy creation is implemented in
-    // `core/search/bm25-index.ts` via `ensureFTSIndex`.
+    // Build the FTS indexes here. The MCP/query path opens the DB read-only
+    // and cannot create them lazily ("Cannot execute write operations in a
+    // read-only database"), which left BM25 search empty. A failure to build
+    // one index is non-fatal.
+    {
+      const { FTS_INDEXES } = await import('./search/bm25-index.js');
+      const { ensureFTSIndex } = await import('./lbug/lbug-adapter.js');
+      progress('fts', 85, 'Building search indexes...');
+      for (const { table, indexName, properties } of FTS_INDEXES) {
+        try {
+          await ensureFTSIndex(table, indexName, [...properties]);
+        } catch (e: any) {
+          log(`FTS index ${indexName} not built: ${e?.message ?? e}`);
+        }
+      }
+    }
 
     // ── Phase 3.5: Re-insert cached embeddings ────────────────────────
     if (cachedEmbeddings.length > 0) {

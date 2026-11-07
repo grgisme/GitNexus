@@ -123,6 +123,18 @@ describe('generateAIContextFiles', () => {
     expect(starts).toBe(1);
   });
 
+  it('--skip-agents-md writes no AGENTS.md, CLAUDE.md or skills dir (#7771)', async () => {
+    const fresh = await fs.mkdtemp(path.join(os.tmpdir(), 'gn-skip-'));
+    await generateAIContextFiles(fresh, storagePath, 'TestProject', { nodes: 10 }, undefined, {
+      skipAgentsMd: true,
+    });
+    const entries = await fs.readdir(fresh);
+    await fs.rm(fresh, { recursive: true, force: true });
+    expect(entries).not.toContain('AGENTS.md');
+    expect(entries).not.toContain('CLAUDE.md');
+    expect(entries).not.toContain('.claude');
+  });
+
   it('installs skills files', async () => {
     const stats = { nodes: 10 };
     const result = await generateAIContextFiles(tmpDir, storagePath, 'TestProject', stats);

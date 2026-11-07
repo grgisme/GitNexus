@@ -14,3 +14,15 @@ describe('emitPythonScopeCaptures large files', () => {
     expect(caps.length).toBeGreaterThan(0);
   });
 });
+
+import { extractParsedFile } from '../../src/core/ingestion/scope-extractor-bridge.js';
+import { pythonProvider } from '../../src/core/ingestion/languages/python.js';
+
+describe('extractParsedFile blank files', () => {
+  it('returns undefined without warning for an empty __init__.py', () => {
+    const warns: string[] = [];
+    const r = extractParsedFile(pythonProvider, '', 'pkg/__init__.py', (m) => warns.push(m));
+    expect(r).toBeUndefined();
+    expect(warns).toEqual([]);
+  });
+});

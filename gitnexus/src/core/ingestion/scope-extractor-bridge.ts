@@ -41,6 +41,9 @@ export function extractParsedFile(
   cachedTree?: unknown,
 ): ParsedFile | undefined {
   if (provider.emitScopeCaptures === undefined) return undefined;
+  // A blank file (e.g. an empty `__init__.py`) has no module range for the
+  // parser to capture; there is nothing to extract and it is not a failure.
+  if (sourceText.trim() === '') return undefined;
   try {
     const captures = provider.emitScopeCaptures(sourceText, filePath, cachedTree);
     return extractScope(captures, filePath, provider);

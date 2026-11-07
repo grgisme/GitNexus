@@ -25,7 +25,7 @@ export interface BM25SearchResult {
  * CLI/pipeline path and the MCP pool path use identical (table, index,
  * properties) tuples and the lazy-create logic stays in one place.
  */
-const FTS_INDEXES: ReadonlyArray<{
+export const FTS_INDEXES: ReadonlyArray<{
   table: string;
   indexName: string;
   properties: readonly string[];
