@@ -13,6 +13,8 @@ describe('isWriteQuery regex tests', () => {
     'ALTER TABLE Something',
     'COPY TO something',
     'DETACH DELETE n',
+    "MATCH (n) WHERE n.name = 'x' DELETE n", // write after a literal
+    "MATCH (n) WHERE n.name = 'a\\' ' SET n.x = 1", // escaped quote must not hide a clause
   ];
 
   const readQueries = [
@@ -23,6 +25,11 @@ describe('isWriteQuery regex tests', () => {
     'MATCH (n) RETURN n',
     'MATCH (n) WHERE n.content CONTAINS ":CREATE" RETURN n',
     'MATCH (n:SomethingWithSET) RETURN n',
+    // #11874: keywords inside string literals (FTS terms) are data, not writes
+    "CALL QUERY_FTS_INDEX('Class', 'class_fts', 'ReclaimSite load complete', conjunctive := false) RETURN node, score",
+    "CALL QUERY_FTS_INDEX('Class', 'class_fts', 'it''s set copy create', conjunctive := false) RETURN node",
+    "CALL QUERY_FTS_INDEX('Class', 'class_fts', 'a\\'b delete', conjunctive := false) RETURN node",
+    'MATCH (n) WHERE n.name = "remove drop" RETURN n',
   ];
 
   it('adapter isWriteQuery should detect real write queries', () => {

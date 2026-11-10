@@ -632,5 +632,15 @@ export const CYPHER_WRITE_RE =
 
 /** Check if a Cypher query contains write operations */
 export function isWriteQuery(query: string): boolean {
-  return CYPHER_WRITE_RE.test(query);
+  return CYPHER_WRITE_RE.test(stripStringLiterals(query));
+}
+
+/** Blank the contents of single- or double-quoted string literals so that
+ * data (e.g. an FTS search term such as 'load complete') cannot trip the
+ * write-keyword guard. Handles backslash escapes and doubled quotes. Keywords
+ * outside literals are untouched, so real write clauses are still caught. */
+function stripStringLiterals(query: string): string {
+  return query
+    .replace(/'(?:[^'\\]|\\[\s\S]|'')*'/g, "''")
+    .replace(/"(?:[^"\\]|\\[\s\S]|"")*"/g, '""');
 }
